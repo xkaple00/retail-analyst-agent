@@ -192,9 +192,30 @@ def golden(
     table.add_column("id")
     table.add_column("status")
     table.add_column("question")
+    table.add_column("thumbs", justify="right")
+    thumbs = tracing.trio_feedback(rt.conn)
     for t in rt.golden.list():
-        table.add_row(t["id"], t.get("status", ""), t["question"][:80])
+        th = thumbs.get(t["id"], {"up": 0, "down": 0})
+        flag = " [red]review[/]" if th["down"] >= 2 and th["down"] > th["up"] else ""
+        table.add_row(t["id"], t.get("status", ""), t["question"][:80], f"+{th['up']}/-{th['down']}{flag}")
     console.print(table)
+
+
+@app.command()
+def feedback(
+    trace_id: str = typer.Argument(..., help="trace id printed after an answer (prefix is enough)"),
+    verdict: str = typer.Argument(..., help="up | down"),
+    user: str = typer.Option("alice"),
+    comment: str = typer.Option("", help="what was wrong or right"),
+) -> None:
+    """Thumbs up/down on an answer; attached to the golden trios that shaped it."""
+    rt = build_runtime()
+    try:
+        res = tracing.record_feedback(rt.conn, trace_id, user, verdict, comment)
+    except (KeyError, ValueError) as e:
+        console.print(f"[red]{e}[/]")
+        raise typer.Exit(1)
+    console.print(f"recorded {res['verdict']} on {res['trace_id']}" + (f" (trios: {', '.join(res['golden_ids'])})" if res["golden_ids"] else ""))
 
 
 @app.command()

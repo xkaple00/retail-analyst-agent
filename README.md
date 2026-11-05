@@ -97,15 +97,20 @@ Second round, 2026-11-05 (Harry), and what changed because of it:
 | Client answer | In the prototype |
 |---|---|
 | Tens to a few hundred executives, few active at once; size for about 100 active managers a day, about 10 questions each | Capacity and cost model in `docs/ARCHITECTURE.md` §15 (about 1,000 questions a day, roughly 6 in flight at peak) |
-| Example questions: top 10 best sellers by revenue and by number of customers, why churn spiked last month, a Q1 report with insights and action items for Q2, RFM segmentation with action items per group | All four are in `evals/questions.jsonl` (q11, q12, q5, q13) and pass |
-| Simple questions 10-30 s, long reports 1-2 min | Latency is a pass/fail check in the evals (30 s simple, 120 s report) and in `evals/last_run.json` |
+| Example questions: top 10 best sellers by revenue and by number of customers, why churn spiked last month, a Q1 report with insights and action items for Q2, RFM segmentation with action items per group | All four are in `evals/questions.jsonl` (q11, q12, q5, q13); see the evidence note under Evals below |
+| Simple questions 10-30 s, long reports 1-2 min | Latency is a pass/fail check in the evals (30 s simple, 120 s report), recorded per question in `evals/last_run.json` |
 | CLI approval is fine; describe an approval approach that scales | `docs/ARCHITECTURE.md` §5 "Approval that scales" |
 | Never show first/last name, email, street address, postal code or exact coordinates; PII must never reach the LLM | Exactly those seven columns are the deny-list; `users` is projected to safe columns before any query; every tool result is masked before it goes to the model; tests in `tests/test_client_answers.py` |
 | Delete: strict confirmation, show the exact list first, hard delete, only the author sees or deletes | `request_delete_reports` returns the exact list, the turn pauses, deletion only after an explicit yes; rows are deleted, not flagged; all lookups are keyed by the author |
 | Charts, web search, email delivery are extension points, no priority | `docs/ARCHITECTURE.md` §13 |
 | Fall back between Gemini models only; other providers in config but switched off; explain the trade-off | `ANALYST_SECOND_PROVIDER_ENABLED=false` by default; `docs/ARCHITECTURE.md` §9 has the trade-off |
 | Assume $1 per question, configurable (design only) | `COST_PER_QUESTION_USD`; the estimated cost of every turn is stored in its trace and a turn above the cap is flagged, not blocked |
-| Chat history 90 days, audit log 1 year, reports until deleted; no compliance rules beyond "PII never reaches the LLM or the output" | `CHAT_RETENTION_DAYS=90`, `AUDIT_RETENTION_DAYS=365`, purged at startup; reports are never purged |
+| Chat history 90 days, audit log 1 year, reports until deleted; no compliance rules beyond "PII never reaches the LLM or the output" | `CHAT_RETENTION_DAYS=90`, `AUDIT_RETENTION_DAYS=365`, purged at startup (SQLite tables and the JSON-lines trace file); reports are never purged |
+
+One choice worth stating: the input guard's classifier is advisory. If the small model is
+down, the rules decide (injection and PII patterns still block) and the turn goes on; set
+`GUARD_FAIL_CLOSED=true` to refuse instead. A GitHub Actions workflow for the unit tests is in
+`ci/tests.yml` (copy it to `.github/workflows/` to enable it); the live evals need a key and run on demand.
 
 Still with Roi: whether one CLI run is one conversation (the prototype supports both: a new
 conversation per run, or `--conversation <id>` to continue one), CEO access to the `users`
@@ -115,8 +120,8 @@ result rows (today they do, masked).
 ### Rate limits
 
 The Gemini free tier allows 5 requests per minute and 20 requests per day on
-`gemini-3.8-flash` (measured 2026-11-04), so a free key runs mostly on the fallback. The agent honours
-the server's retry delay once, then walks the fallback chain `ANALYST_FALLBACK_MODEL`
+`gemini-3.8-flash` (measured 2026-11-04), so a free key runs mostly on the fallback. The agent gives each model one attempt and walks
+the fallback chain `ANALYST_FALLBACK_MODEL`
 (default `gemini-3.5-flash-lite,gemini-3.5-flash`, all Gemini as the client asked), so a model
 call never waits more than about 15 seconds on quota (the guard classifier runs on the cheap
 model directly and answers in 1-4 s). On 2026-11-05 both `gemini-3.8-flash` and
@@ -206,8 +211,21 @@ Other commands: `analyst reports --user alice [--show ID]`, `analyst golden list
 `analyst persona`, `analyst users`. In chat: `/help /reports /prefs /trace /persona /quit`.
 
 Evals against the live stack (needs keys): `python evals/run_evals.py`. Deterministic checks
-plus ground-truth values from a reference query and a judge model; the last run with answers and
-trace ids is in `evals/last_run.json`.
+plus ground-truth values from a reference query and a judge model; the last run with answers,
+latency, estimated cost and trace ids is in `evals/last_run.json`.
+
+Evidence note (2026-11-05): the committed `last_run.json` is an honest 4/13. It was the fourth
+full run of the day on a free AI Studio key, by which point `gemini-3.8-flash` and
+`gemini-3.5-flash` had hit their daily free-tier caps (429) and `gemini-3.5-flash-lite` was
+answering a one-word prompt in 13 s, so most failures are "model API unavailable" or the 30 s
+latency check, not wrong answers: every question that got a model answered correctly (judge 5/5,
+ground truth matched where defined). Earlier the same day, before the caps, the quarterly report
+(q5) passed all checks in 75 s and the top-10 and churn questions (q11, q12) were answered
+correctly with judge 5/5 but over 30 s. The previous day's run on fresh quota was 10/10 for q1-q10.
+The 2026-11-05 runs are also what exposed the hung-primary and quota-wait latency problems and
+led to the call timeout, the single-attempt fallback chain and the breaker. Re-run after the daily
+reset (08:00 UTC) or with a paid key to refresh the file; the eval pace (`--pace`) keeps the
+harness itself under the free-tier per-minute limit.
 
 ## Configuration
 

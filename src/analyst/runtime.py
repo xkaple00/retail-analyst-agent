@@ -10,7 +10,7 @@ from .config import Settings, User, get_user
 from .golden import GoldenStore
 from .llm import LLM, GeminiLLM
 from .reports import Conversations, Preferences, ReportLibrary
-from .store import connect, purge_expired
+from .store import connect, purge_expired, purge_jsonl
 from .tracing import Prices, Tracer
 
 
@@ -32,6 +32,7 @@ def build_runtime(settings: Settings | None = None) -> Runtime:
     s = settings or Settings()
     conn = connect(s.data_dir)
     purge_expired(conn, s.chat_retention_days, s.audit_retention_days)  # retention: chat 90 d, audit 1 y, reports never
+    purge_jsonl(s.data_dir / "traces.jsonl", s.audit_retention_days)
     prices = Prices(s.price_per_m_input_tokens, s.price_per_m_output_tokens, s.price_per_tb_bigquery, s.cost_per_question_usd)
     return Runtime(
         settings=s,

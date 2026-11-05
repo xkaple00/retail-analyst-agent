@@ -155,6 +155,12 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
         return int(durs[min(len(durs) - 1, int(p * len(durs)))])
 
     n = row["n"] or 0
+    pii_hits = conn.execute("SELECT COUNT(*) FROM spans WHERE kind = 'pii'").fetchone()[0]
+    budget_exhausted = conn.execute(
+        "SELECT COUNT(*) FROM spans WHERE kind = 'tool' AND payload LIKE '%attempt budget exhausted%'"
+    ).fetchone()[0]
+    over_cost = conn.execute("SELECT COUNT(*) FROM spans WHERE kind = 'budget' AND name = 'over_question_cost'").fetchone()[0]
+    fb = conn.execute("SELECT SUM(verdict='up') up, SUM(verdict='down') down FROM feedback").fetchone()
     return {
         "turns": n,
         "ok": row["ok"] or 0,
@@ -175,7 +181,42 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "llm_fallbacks": row["fallbacks"] or 0,
         "estimated_cost_usd": round(row["cost"] or 0.0, 4),
         "max_cost_per_turn_usd": round(row["max_cost"] or 0.0, 4),
+        # the §10 alerts: each of these should be zero or near zero
+        "pii_mask_hits": pii_hits,
+        "attempt_budget_exhausted": budget_exhausted,
+        "turns_over_cost_cap": over_cost,
+        "feedback_up": fb["up"] or 0,
+        "feedback_down": fb["down"] or 0,
     }
+
+
+def record_feedback(conn: sqlite3.Connection, trace_id: str, user_id: str, verdict: str, comment: str = "") -> dict:
+    """Thumbs up/down on an answer (user-level signal). The golden trios that shaped the answer are
+    attached, so repeated thumbs-down can flag a trio for review (ARCHITECTURE.md §5 and §8)."""
+    if verdict not in ("up", "down"):
+        raise ValueError("verdict must be 'up' or 'down'")
+    t = get_trace(conn, trace_id)
+    if not t or t["user_id"] != user_id:
+        raise KeyError(f"no trace {trace_id} for user {user_id}")
+    ids: list[str] = []
+    for s in t["spans"]:
+        if s["kind"] == "golden" and s["name"] == "injected":
+            ids = list(s["payload"].get("ids") or [])
+    conn.execute(
+        "INSERT INTO feedback(trace_id, user_id, verdict, comment, golden_ids) VALUES (?,?,?,?,?)",
+        (t["trace_id"], user_id, verdict, comment[:500], json.dumps(ids)),
+    )
+    conn.commit()
+    return {"trace_id": t["trace_id"], "verdict": verdict, "golden_ids": ids}
+
+
+def trio_feedback(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    """Thumbs per golden trio id, for the reviewer queue (a trio with repeated downs is flagged)."""
+    out: dict[str, dict[str, int]] = {}
+    for r in conn.execute("SELECT verdict, golden_ids FROM feedback"):
+        for gid in json.loads(r["golden_ids"] or "[]"):
+            out.setdefault(gid, {"up": 0, "down": 0})[r["verdict"]] += 1
+    return out
 
 
 def recent(conn: sqlite3.Connection, n: int = 10) -> list[dict]:

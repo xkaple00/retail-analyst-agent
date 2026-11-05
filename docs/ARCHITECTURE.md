@@ -193,8 +193,11 @@ The design therefore makes people the exception, not the path:
    glossary that the finance owner maintains; a trio that contradicts the glossary is rejected
    automatically and the contradiction is reported.
 
-The prototype has the first two gates in simple form (approve dry-runs the SQL, candidates are
-one per question text) and the CLI queue; the rest is design.
+The prototype has gate 1 (a turn with a failed SQL attempt files no candidate; approve dry-runs
+the SQL), the CLI queue, and the feedback hook of step 3: `analyst feedback <trace> up|down`
+stores the verdict with the ids of the trios that were injected into that answer, and
+`analyst golden list` shows thumbs per trio and flags one with repeated downs for review. The
+rest is design.
 
 ## 6. Safety and PII
 
@@ -259,7 +262,9 @@ model: (1) approved golden trios improve retrieval for everyone; (2) self-correc
 (SQL error -> fix) are mined weekly for recurring mistakes and turned into lines in the
 system prompt or into new trios ("always cast created_at to DATE before DATE_TRUNC");
 (3) eval scores per prompt version decide which prompt version is live. All of this is data
-plus prompts, so it ships without a deploy.
+plus prompts, so it ships without a deploy. **[proto: thumbs up/down per answer (`analyst
+feedback`), attributed to the injected trios and counted in `analyst stats`; the mining and
+prompt-version gating are design]**
 
 ## 9. Resilience and error handling
 
@@ -269,7 +274,7 @@ plus prompts, so it ships without a deploy.
 | Empty result | Returned as `row_count 0` with a hint to check filters once; it counts against the same 3-attempt budget as an error, so empty results cannot loop for free. **[proto]** |
 | Expensive query | Dry run first; over the byte cap it is rejected with a hint to narrow. `maximum_bytes_billed` on the real run as a hard stop. **[proto]** |
 | Slow query | Timeout (60 s): the BigQuery job is cancelled (no background billing) and the model gets a "narrow the query" error that counts as an attempt. **[proto]** |
-| Model 429/5xx, 404 (wrong model name) | One retry honouring the server retry hint (capped at 15 s), then the fallback model with the same history (Gemini 3 thought signatures replay across the two models; verified live, a missing one is a 400), then a friendly error; the session survives. **[proto]** |
+| Model 429/5xx, 404 (wrong model name) | One attempt, then the next model in the chain with the same history (Gemini 3 thought signatures replay across the models; verified live, a missing one is a 400); only the last model is retried, honouring the server retry hint (capped at 15 s); then a friendly error and the session survives. Waiting out a quota hint on a model that has a fallback behind it was measured at 15-30 s per call on 2026-11-05, which is the whole latency budget. **[proto]** |
 | Model hangs (no answer within `LLM_TIMEOUT_S`, 25 s) | No retry on the same model: straight to the fallback, and a breaker skips the primary for `LLM_PRIMARY_COOLDOWN_S` (5 min) so later questions do not pay the timeout again. Production: the breaker state lives in Redis so all instances share it. **[proto]** |
 | Model 400/401/403 | No fallback (a second model would repeat the same rejection); friendly error with the reason in the trace. **[proto]** |
 | Model vendor outage | Default (client's choice): fall back between Gemini models only, a chain (`ANALYST_FALLBACK_MODEL=gemini-3.5-flash-lite,gemini-3.5-flash`) walked in order with a per-model breaker; a second provider is in config (`ANALYST_SECOND_PROVIDER`, `ANALYST_SECOND_PROVIDER_ENABLED=false`) but off. **[proto: chain + switch]** See the trade-off below. |
@@ -302,16 +307,19 @@ One trace per turn, with spans:
 
 Metrics derived from traces (prototype: `analyst stats`; production: Cloud Monitoring from
 OTel): turns, error rate, refusal rate, p50/p95 latency, LLM calls per turn, tokens and bytes
-per turn (cost), SQL self-correction rate (failures / attempts), attempt-budget exhaustion
-rate, fallback rate, guard outcomes, delete confirmations vs cancellations, report saves,
-candidate trios per week, thumbs up/down. Alerts: error rate > 5 % over 15 min, p95 > 30 s,
+per turn (cost, estimated per turn), SQL self-correction rate (failures / attempts),
+attempt-budget exhaustion count, PII mask hits, turns over the cost cap, fallback rate, guard
+outcomes, delete confirmations vs cancellations, report saves, candidate trios per week,
+thumbs up/down. **[proto: all of these except guard outcomes and delete counts are in
+`analyst stats`]** Alerts: error rate > 5 % over 15 min, p95 > 30 s,
 fallback rate > 20 %, any PII mask replacement in output (should be zero, each one is a bug
 to look at), daily cost over budget.
 
 Retention (client): chat history 90 days, audit log (traces, spans, deletion log) 1 year,
 saved reports until the author deletes them, preferences until changed. The prototype purges
 at startup (`CHAT_RETENTION_DAYS`, `AUDIT_RETENTION_DAYS`); production runs the same purge as a
-nightly job and applies the same windows to the log store. Open with Roi: whether traces may
+nightly job and applies the same windows to the log store; the JSON-lines copy of the
+traces is purged with the same window as the table. Open with Roi: whether traces may
 keep the full prompt and the result rows (they are masked, but they are data).
 
 Deep dive: `analyst trace <id>` prints the full correspondence: the system prompt the model

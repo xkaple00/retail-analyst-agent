@@ -135,6 +135,8 @@ class Agent:
         block = self.golden.prompt_block(message)
         if block:
             parts.append("## Golden examples\n" + block)
+            if self.trace is not None:  # which trios shaped this answer, so feedback can be attributed to them
+                self.trace.event("golden", "injected", ids=[h["id"] for h in self.golden.search(message)])
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------ history
@@ -403,12 +405,16 @@ class Agent:
         self._saved_this_turn = True
         rid = self.reports.save(self.user.id, self.conversation_id, title, markdown)
         out: dict[str, Any] = {"saved": True, "report_id": rid, "title": title}
-        if self._turn_sqls and self.last_question:
-            # All queries of the turn, in order, so a multi-step report keeps its full SQL.
+        if self._turn_sqls and self.last_question and not self._sql_failures:
+            # All queries of the turn, in order, so a multi-step report keeps its full SQL. A turn that
+            # needed a SQL correction is not a candidate: the SQL that finally ran was not what the
+            # analyst-quality example should look like (gate 1 of ARCHITECTURE.md §5).
             sql = "\n\n-- next query\n".join(self._turn_sqls)
             out["golden_candidate"] = self.golden.add_candidate(
                 self.last_question, sql, markdown[:4000], self.user.id, self.trace.trace_id if self.trace else ""
             )
+        elif self._sql_failures and self.trace is not None:
+            self.trace.event("golden", "candidate_skipped", reason="turn had failed SQL attempts", failures=self._sql_failures)
         return out
 
     def _delete_flow(self, args: dict, confirm: ConfirmFn | None) -> dict:

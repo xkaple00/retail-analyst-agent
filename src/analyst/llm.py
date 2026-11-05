@@ -57,12 +57,6 @@ RETRYABLE_CODES = {408, 409, 429, 500, 502, 503, 504}
 NO_FALLBACK_CODES = {400, 401, 403}
 
 
-def more_retries(err: Exception, max_attempts: int) -> int:
-    """Retries spent on a model that finally failed: every attempt but the first (none if it was not transient)."""
-    code = _status_code(err)
-    return max_attempts - 1 if (code in RETRYABLE_CODES or code is None) else 0
-
-
 def _is_timeout(err: Exception) -> bool:
     """A hung request (client-side timeout). Retrying the same model would just hang again."""
     name = type(err).__name__.lower()
@@ -152,18 +146,22 @@ class GeminiLLM:
         return types.GenerateContentConfig(**kwargs)
 
     # --- calls --------------------------------------------------------
-    def _generate(self, model: str, contents, config) -> tuple[Any, int]:
-        """Call with retry on transient errors. Returns (response, retries)."""
+    def _generate(self, model: str, contents, config, patient: bool = True) -> tuple[Any, int]:
+        """Call with retry on transient errors. Returns (response, retries).
+
+        `patient=False` means one attempt only: when another model can answer, waiting out a 429
+        "retry in 15s" hint or a 503 backoff on this one is time the user pays for nothing.
+        """
         retries = 0
         last: Exception | None = None
-        for attempt in range(self.max_attempts):
+        for attempt in range(self.max_attempts if patient else 1):
             try:
                 return self._client.models.generate_content(model=model, contents=contents, config=config), retries
             except Exception as e:  # google.genai.errors.APIError and network errors
                 code = _status_code(e)
                 transient = code in RETRYABLE_CODES or code is None
                 last = e
-                if not transient or attempt == self.max_attempts - 1 or _is_timeout(e):
+                if not transient or not patient or attempt == self.max_attempts - 1 or _is_timeout(e):
                     break  # a hang is not retried on the same model: the fallback answers faster
                 retries += 1
                 delay = min(8.0, (2**attempt) + random.random())
@@ -193,7 +191,8 @@ class GeminiLLM:
                 log.info("model %s cooling down, skipping to %s", m, chain[i + 1])
                 continue  # breaker open: this model failed a moment ago, do not pay its timeout again
             try:
-                resp, more = self._generate(m, contents, config)
+                # Only the last model in the chain is worth waiting for; the others get one attempt.
+                resp, more = self._generate(m, contents, config, patient=is_last)
                 retries += more
                 used = m
                 break
@@ -206,7 +205,7 @@ class GeminiLLM:
                 # Remember that this model is unhealthy so the next calls skip straight to the next one
                 # (client target: simple answers within 30 s; a hung model must not be paid for twice).
                 _PRIMARY_DOWN_UNTIL[m] = time.monotonic() + cooldown
-                retries += 0 if _is_timeout(e) else more_retries(e, self.max_attempts)
+                retries += 1  # one failed attempt on this model before moving on
                 log.warning("falling back to %s after %s: %s (skipped for %.0fs)", chain[i + 1], m, e, cooldown)
         if resp is None:
             raise LLMUnavailable(f"model API unavailable ({', '.join(chain)}): {last}") from last
@@ -237,7 +236,8 @@ class GeminiLLM:
         # A one-line verdict, but with room for a thinking model's reasoning tokens (the free-tier
         # models do not accept thinking_budget=0); an empty answer is treated as "classifier unavailable".
         config = types.GenerateContentConfig(system_instruction=system, temperature=0.0, max_output_tokens=1024)
-        resp, _ = self._generate(model or self.model, contents, config)
+        # One attempt: the guard is advisory (rules decide when it fails) and must not wait out a quota hint.
+        resp, _ = self._generate(model or self.model, contents, config, patient=False)
         return (resp.text or "").strip()
 
 

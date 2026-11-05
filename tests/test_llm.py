@@ -54,17 +54,27 @@ def _llm(outcomes, monkeypatch, attempts=3):
     return llm
 
 
-def test_retry_then_success(monkeypatch):
+def test_retry_then_success_when_there_is_no_fallback(monkeypatch):
+    """Without another model to go to, transient errors are retried on the only one."""
     llm = _llm([_Err(429), _Err(503), None], monkeypatch)
+    llm.fallback_model = None
     r = llm.chat("s", [], [])
     assert isinstance(r, LLMResponse) and r.text == "hi" and r.retries == 2 and not r.fallback_used
     assert llm._client.seen_models == ["primary"] * 3
 
 
-def test_fallback_after_retries(monkeypatch):
-    llm = _llm([_Err(503)] * 3 + [None], monkeypatch)
+def test_one_attempt_then_fallback(monkeypatch):
+    """With a fallback available, a failing primary is not waited for: one attempt, then the next model."""
+    llm = _llm([_Err(429), None], monkeypatch)
     r = llm.chat("s", [], [])
-    assert r.fallback_used and r.model == "fallback"
+    assert r.fallback_used and r.model == "fallback" and r.retries == 1
+    assert llm._client.seen_models == ["primary", "fallback"]
+
+
+def test_last_model_in_the_chain_is_retried(monkeypatch):
+    llm = _llm([_Err(503), _Err(503), None], monkeypatch, attempts=2)
+    r = llm.chat("s", [], [])
+    assert r.model == "fallback" and llm._client.seen_models == ["primary", "fallback", "fallback"]
 
 
 def test_bad_request_is_not_retried_on_the_fallback(monkeypatch):
@@ -110,11 +120,12 @@ def test_total_outage_raises(monkeypatch):
         llm.chat("s", [], [])
 
 
-def test_default_is_one_retry_then_fallback(monkeypatch):
-    """Production setting (max_attempts=2): one retry on the primary, then the fallback model."""
-    llm = _llm([_Err(429), _Err(503), None], monkeypatch, attempts=2)
-    r = llm.chat("s", [], [])
-    assert r.retries == 1 and r.fallback_used and llm._client.seen_models == ["primary", "primary", "fallback"]
+def test_classify_is_one_attempt(monkeypatch):
+    """The guard is advisory: it must never wait out a quota hint; rules decide when it fails."""
+    llm = _llm([_Err(429), None], monkeypatch)
+    with pytest.raises(_Err):
+        llm._generate("guard-model", [], None, patient=False)
+    assert llm._client.seen_models == ["guard-model"]
 
 
 def test_hung_primary_is_not_retried_and_falls_back_at_once(monkeypatch):
@@ -126,11 +137,11 @@ def test_hung_primary_is_not_retried_and_falls_back_at_once(monkeypatch):
 
 def test_primary_breaker_skips_the_primary_during_cooldown(monkeypatch):
     """After one failure the next calls go straight to the fallback until the cooldown ends."""
-    llm = _llm([_Err(503), _Err(503), None, None, None], monkeypatch, attempts=2)
+    llm = _llm([_Err(503), None, None, None], monkeypatch, attempts=2)
     llm.chat("s", [], [])
-    assert llm._client.seen_models == ["primary", "primary", "fallback"]
+    assert llm._client.seen_models == ["primary", "fallback"]
     r = llm.chat("s", [], [])  # breaker open: no primary attempt at all
-    assert r.fallback_used and r.retries == 0 and llm._client.seen_models[-1] == "fallback" and len(llm._client.seen_models) == 4
+    assert r.fallback_used and r.retries == 0 and llm._client.seen_models[-1] == "fallback" and len(llm._client.seen_models) == 3
     _PRIMARY_DOWN_UNTIL.clear()  # cooldown over
     llm.chat("s", [], [])
     assert llm._client.seen_models[-1] == "primary"
@@ -156,14 +167,14 @@ def test_breaker_is_shared_between_client_instances(monkeypatch):
 
 def test_fallback_chain_tries_models_in_order(monkeypatch):
     """ANALYST_FALLBACK_MODEL may be a comma list: primary -> a -> b, each skipped for the cooldown after a failure."""
-    llm = _llm([_Err(503), _Err(503), _Err(503), _Err(503), None], monkeypatch, attempts=2)
+    llm = _llm([_Err(503), _Err(503), None], monkeypatch, attempts=2)
     llm.fallback_model = "fb1,fb2"
     r = llm.chat("s", [], [])
-    assert r.fallback_used and r.model == "fb2"
-    assert llm._client.seen_models == ["primary", "primary", "fb1", "fb1", "fb2"]
+    assert r.fallback_used and r.model == "fb2" and r.retries == 2
+    assert llm._client.seen_models == ["primary", "fb1", "fb2"]
     llm._client.outcomes.append(None)
     r2 = llm.chat("s", [], [])  # both earlier models cooling down: straight to fb2
-    assert r2.model == "fb2" and llm._client.seen_models[-1] == "fb2" and len(llm._client.seen_models) == 6
+    assert r2.model == "fb2" and llm._client.seen_models[-1] == "fb2" and len(llm._client.seen_models) == 4
 
 
 def test_whole_chain_down_names_every_model(monkeypatch):

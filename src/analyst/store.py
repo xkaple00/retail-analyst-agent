@@ -80,6 +80,15 @@ CREATE TABLE IF NOT EXISTS messages (
   raw TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+CREATE TABLE IF NOT EXISTS feedback (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trace_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  verdict TEXT NOT NULL,
+  comment TEXT,
+  golden_ids TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 CREATE INDEX IF NOT EXISTS messages_conv ON messages(conversation_id, user_id);
 CREATE INDEX IF NOT EXISTS spans_trace ON spans(trace_id);
 """
@@ -129,3 +138,27 @@ def purge_expired(conn: sqlite3.Connection, chat_days: int, audit_days: int) -> 
         ).rowcount
     conn.commit()
     return out
+
+
+def purge_jsonl(path: Path, audit_days: int) -> int:
+    """Drop trace lines older than the audit window from the JSON-lines copy (same rule as the `traces` table)."""
+    if audit_days <= 0 or not path.exists():
+        return 0
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=audit_days)).isoformat()
+    kept, dropped = [], 0
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            try:
+                started = json.loads(line).get("started_at", "")
+            except json.JSONDecodeError:
+                started = ""
+            if started and started < cutoff:
+                dropped += 1
+            else:
+                kept.append(line)
+    if dropped:
+        path.write_text("".join(kept), encoding="utf-8")
+    return dropped

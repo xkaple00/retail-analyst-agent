@@ -192,8 +192,10 @@ an earlier conversation and an agent can be rebuilt per request.
 
 LLM calls (`llm.py`):
 
-- Retry on 429 and 5xx once, honouring the server retry hint (max 15 s), so a
-  rate-limited turn never stalls for minutes.
+- A model that has a fallback behind it gets one attempt: waiting out a 429
+  "retry in 15 s" hint on it is time the user pays for nothing. Only the last
+  model in the chain is retried (once, honouring the server hint, max 15 s). The
+  guard classifier is always one attempt; rules decide when it fails.
 - One call is capped at `LLM_TIMEOUT_S` (25 s). A timeout is not retried on
   the same model; the fallback answers. After any primary failure the primary
   is skipped for `LLM_PRIMARY_COOLDOWN_S` (300 s) (in-process breaker), so the
@@ -246,8 +248,10 @@ and `preferences` are never purged. `purge_expired` runs at every startup; 0
 disables a window.
 
 CLI: `analyst stats` (counts, error rate, p50/p95 latency, tokens, bytes,
-self-correction rate, estimated cost), `analyst traces --last N`, `analyst trace <id>` (full
-message correspondence and spans). Logs are JSON lines, so they can be shipped
+self-correction rate, estimated cost, PII mask hits, attempt-budget exhaustions, turns over
+the cost cap, thumbs up/down), `analyst traces --last N`, `analyst trace <id>` (full
+message correspondence and spans), `analyst feedback <trace> up|down --comment` (stored with
+the golden trio ids that were injected into that answer). Logs are JSON lines, so they can be shipped
 to any log store. Production path: the same spans exported with OpenTelemetry
 to Langfuse/Cloud Trace (design doc).
 
