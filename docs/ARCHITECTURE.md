@@ -2,8 +2,10 @@
 
 This is the production design. The prototype in this repo implements the parts marked
 **[proto]** for real and the rest in a minimal form, so the shape of the system is the
-same in both. Section 9 maps every requirement from the assignment to a design decision
-and to the code that shows it.
+same in both. Sections 5 to 12 take the eight requirements from the assignment one by one
+(hybrid intelligence, safety and PII, oversight, learning loop, resilience, QA, observability,
+persona), each with the design decision and the code that shows it; sections 13 to 15 cover
+extensibility, security and capacity.
 
 ## 1. What the system does
 
@@ -46,12 +48,12 @@ flowchart TB
     subgraph Knowledge["Golden knowledge"]
         VDB[(Vector store<br/>Vertex AI Vector Search / pgvector)]
         GB[(Golden bucket<br/>GCS: trios as JSON)]
-        Review[Reviewer queue<br/>analyst approves candidates]
+        Review[Reviewer queue<br/>Langfuse annotation queue, CLI in proto]
     end
 
     subgraph State["State"]
         PG[(Cloud SQL Postgres<br/>reports, preferences, conversations, confirmations)]
-        Mem[(Memory<br/>user prefs + system lessons)]
+        Mem[(Memory<br/>Postgres tables: preferences, lessons)]
     end
 
     subgraph LLM["Models"]
@@ -277,7 +279,7 @@ prompt-version gating are design]**
 | Model 429/5xx, 404 (wrong model name) | One attempt, then the next model in the chain with the same history (Gemini 3 thought signatures replay across the models; verified live, a missing one is a 400); only the last model is retried, honouring the server retry hint (capped at 15 s); then a friendly error and the session survives. Waiting out a quota hint on a model that has a fallback behind it was measured at 15-30 s per call on 2026-11-05, which is the whole latency budget. **[proto]** |
 | Model hangs (no answer within `LLM_TIMEOUT_S`, 25 s) | No retry on the same model: straight to the fallback, and a breaker skips the primary for `LLM_PRIMARY_COOLDOWN_S` (5 min) so later questions do not pay the timeout again. Production: the breaker state lives in Redis so all instances share it. **[proto]** |
 | Model 400/401/403 | No fallback (a second model would repeat the same rejection); friendly error with the reason in the trace. **[proto]** |
-| Model vendor outage | Default (client's choice): fall back between Gemini models only, a chain (`ANALYST_FALLBACK_MODEL=gemini-3.5-flash-lite,gemini-3.5-flash`) walked in order with a per-model breaker; a second provider is in config (`ANALYST_SECOND_PROVIDER`, `ANALYST_SECOND_PROVIDER_ENABLED=false`) but off. **[proto: chain + switch]** See the trade-off below. |
+| Model vendor outage | Default (client's choice): fall back between Gemini models only, a chain (`ANALYST_FALLBACK_MODEL=gemini-3.5-flash,gemini-3.5-flash-lite`) walked in order with a per-model breaker; a second provider is in config (`ANALYST_SECOND_PROVIDER`, `ANALYST_SECOND_PROVIDER_ENABLED=false`) but off. **[proto: chain + switch]** See the trade-off below. |
 | BigQuery down / no credentials | `DataUnavailable` -> one friendly line; report and preference features keep working. **[proto]** |
 | Runaway loop | 1 guard call + at most 6 LLM calls per turn; the 6th runs without tools so the agent answers with what it has. **[proto]** |
 | Bug in the agent | Catch-all turns any exception into a logged, traced error message; the CLI never crashes. **[proto]** |
@@ -310,8 +312,10 @@ OTel): turns, error rate, refusal rate, p50/p95 latency, LLM calls per turn, tok
 per turn (cost, estimated per turn), SQL self-correction rate (failures / attempts),
 attempt-budget exhaustion count, PII mask hits, turns over the cost cap, fallback rate, guard
 outcomes, delete confirmations vs cancellations, report saves, candidate trios per week,
-thumbs up/down. **[proto: all of these except guard outcomes and delete counts are in
-`analyst stats`]** Alerts: error rate > 5 % over 15 min, p95 > 30 s,
+thumbs up/down. **[proto: `analyst stats` has the counts and rates for turns, errors,
+latency, calls, tokens, bytes, cost, self-correction, attempt-budget exhaustion, PII hits,
+cost-cap breaches, fallbacks and thumbs; guard outcomes, delete counts, report saves and
+candidates per week are in the traces and tables but not yet summarised]** Alerts: error rate > 5 % over 15 min, p95 > 30 s,
 fallback rate > 20 %, any PII mask replacement in output (should be zero, each one is a bug
 to look at), daily cost over budget.
 

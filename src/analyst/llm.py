@@ -57,6 +57,16 @@ RETRYABLE_CODES = {408, 409, 429, 500, 502, 503, 504}
 NO_FALLBACK_CODES = {400, 401, 403}
 
 
+DAILY_QUOTA_COOLDOWN_S = 3600.0
+
+
+def _cooldown_for(err: Exception, default: float) -> float:
+    """A daily free-tier quota (429 ...PerDay...) will not clear in five minutes: skip the model for an hour."""
+    if _status_code(err) == 429 and re.search(r"per\s*day", str(err), re.I):
+        return max(default, DAILY_QUOTA_COOLDOWN_S)
+    return default
+
+
 def _is_timeout(err: Exception) -> bool:
     """A hung request (client-side timeout). Retrying the same model would just hang again."""
     name = type(err).__name__.lower()
@@ -204,7 +214,7 @@ class GeminiLLM:
                     break
                 # Remember that this model is unhealthy so the next calls skip straight to the next one
                 # (client target: simple answers within 30 s; a hung model must not be paid for twice).
-                _PRIMARY_DOWN_UNTIL[m] = time.monotonic() + cooldown
+                _PRIMARY_DOWN_UNTIL[m] = time.monotonic() + _cooldown_for(e, cooldown)
                 retries += 1  # one failed attempt on this model before moving on
                 log.warning("falling back to %s after %s: %s (skipped for %.0fs)", chain[i + 1], m, e, cooldown)
         if resp is None:

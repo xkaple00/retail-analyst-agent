@@ -22,7 +22,7 @@ class Settings:
     project: str = field(default_factory=lambda: os.getenv("GOOGLE_CLOUD_PROJECT", "") or None)
     model: str = field(default_factory=lambda: os.getenv("ANALYST_MODEL", "gemini-3.8-flash"))
     fallback_model: str = field(
-        default_factory=lambda: os.getenv("ANALYST_FALLBACK_MODEL", "gemini-3.5-flash-lite,gemini-3.5-flash")
+        default_factory=lambda: os.getenv("ANALYST_FALLBACK_MODEL", "gemini-3.5-flash,gemini-3.5-flash-lite")
     )  # comma-separated chain, tried in order (all Gemini: the client's choice)
     guard_model: str = field(
         default_factory=lambda: os.getenv("ANALYST_GUARD_MODEL", "gemini-3.5-flash-lite")

@@ -26,12 +26,12 @@ flowchart TB
     subgraph Knowledge["Golden knowledge"]
         VDB[(Vector store<br/>Vertex AI Vector Search / pgvector)]
         GB[(Golden bucket<br/>GCS: trios as JSON)]
-        Review[Reviewer queue<br/>analyst approves candidates]
+        Review[Reviewer queue<br/>Langfuse annotation queue, CLI in proto]
     end
 
     subgraph State["State"]
         PG[(Cloud SQL Postgres<br/>reports, preferences, conversations, confirmations)]
-        Mem[(Memory<br/>user prefs + system lessons)]
+        Mem[(Memory<br/>Postgres tables: preferences, lessons)]
     end
 
     subgraph LLM["Models"]

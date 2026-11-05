@@ -1,6 +1,6 @@
 # SPEC: Retail Analyst Agent (prototype)
 
-Version 1.0, 2026-11-04. This is the build spec for the OpsFleet assignment
+Version 1.1, 2026-11-05 (1.0 was 2026-11-04; 1.1 folds in the client answers of 2026-11-05). This is the build spec for the OpsFleet assignment
 ("Design and Build a Data Analysis Chat Assistant"). The HLD for production lives
 in `docs/ARCHITECTURE.md`; this file says exactly what the prototype does, so the
 code can be checked against it.
@@ -39,7 +39,8 @@ In scope for the prototype:
 - Runs with `pip` or with Docker. Tests run without network.
 
 Out of scope (design only, in `docs/ARCHITECTURE.md`): vector database for the
-golden bucket, human review queue for golden candidates, multi-user web UI,
+golden bucket, a reviewer UI for golden candidates (the prototype has the CLI queue
+`analyst golden list|approve`), multi-user web UI,
 OpenTelemetry export, eval pipeline in CI, chart generation, email delivery,
 web search.
 
@@ -201,7 +202,7 @@ LLM calls (`llm.py`):
   is skipped for `LLM_PRIMARY_COOLDOWN_S` (300 s) (in-process breaker), so the
   client's 30 s target holds while the primary is unhealthy.
 - Then the fallback chain `ANALYST_FALLBACK_MODEL` (comma list, default
-  `gemini-3.5-flash-lite,gemini-3.5-flash`), each model once with the same
+  `gemini-3.5-flash,gemini-3.5-flash-lite`), each model once with the same
   retry rule (also on 404 = wrong model name), with the same history: Gemini 3
   thought signatures replay across the models (verified live; a function call
   without its signature is rejected with 400).
@@ -290,7 +291,9 @@ analyst chat --user alice --conversation 1a2b3c4d   # continue an earlier conver
 analyst stats | traces | trace <id>  # observability
 analyst reports --user alice         # report library
 analyst golden list|approve <id> [--note "..."]
+analyst feedback <trace> up|down --user alice --comment "..."
 analyst persona
+analyst users
 ```
 
 In-chat commands: `/help`, `/reports`, `/prefs`, `/trace` (last trace id),
@@ -298,7 +301,8 @@ In-chat commands: `/help`, `/reports`, `/prefs`, `/trace` (last trace id),
 
 Configuration via `.env`: `GEMINI_API_KEY`, `GOOGLE_CLOUD_PROJECT`,
 `ANALYST_MODEL` (default `gemini-3.8-flash`), `ANALYST_FALLBACK_MODEL`
-(`gemini-3.5-flash-lite`), `ANALYST_GUARD_MODEL`, `ANALYST_JUDGE_MODEL`,
+(chain, default `gemini-3.5-flash,gemini-3.5-flash-lite`), `ANALYST_GUARD_MODEL`,
+`ANALYST_JUDGE_MODEL`, `LLM_TIMEOUT_S`, `LLM_PRIMARY_COOLDOWN_S`,
 `MAX_BYTES_PER_QUERY`, `QUERY_TIMEOUT_S`, `DAILY_TOKEN_BUDGET`, `DAILY_BYTES_BUDGET`,
 `GUARD_FAIL_CLOSED`, `ANALYST_DATA_DIR`.
 

@@ -29,7 +29,7 @@ def test_happy_path_runs_scoped_sql_and_traces(make_agent, alice, rt):
     assert t["llm_calls"] == 2 and t["tool_calls"] == 1 and t["sql_attempts"] == 1 and t["sql_failures"] == 0
     assert t["prompt_tokens"] == 250 and t["bytes_billed"] == 1234
     kinds = sorted(s["kind"] for s in t["spans"])
-    assert kinds == ["golden", "guard", "llm", "llm", "prompt", "sql", "tool"]  # golden = which trios were injected
+    assert kinds == ["golden", "guard", "llm", "llm", "prompt", "schema", "sql", "tool"]  # golden = injected trios, schema = metadata fetch
     prompt_span = next(s for s in t["spans"] if s["kind"] == "prompt")
     assert "Golden examples" in prompt_span["payload"]["text"]  # the full system prompt is in the trace
     sql_span = next(s for s in t["spans"] if s["kind"] == "sql")

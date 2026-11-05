@@ -52,6 +52,11 @@ def _jsonable(v: Any) -> Any:
     return v
 
 
+# Table schemas change rarely; one metadata call per table per process, not per request
+# (an Agent and its runner are built per request, and four metadata calls cost 2-15 s on a slow link).
+_SCHEMA_CACHE: dict[str, list[dict[str, str]]] = {}
+
+
 class BigQueryRunner:
     """Thin wrapper over google-cloud-bigquery. Construction is lazy so the CLI starts without creds."""
 
@@ -59,7 +64,7 @@ class BigQueryRunner:
         self._project = project
         self._max_bytes = max_bytes
         self._client = None
-        self._schema_cache: dict[str, list[dict[str, str]]] = {}
+        self._schema_cache = _SCHEMA_CACHE
 
     @property
     def client(self):

@@ -182,3 +182,13 @@ def test_whole_chain_down_names_every_model(monkeypatch):
     llm.fallback_model = "fb1,fb2"
     with pytest.raises(LLMUnavailable, match="primary, fb1, fb2"):
         llm.chat("s", [], [])
+
+
+def test_daily_quota_opens_the_breaker_for_an_hour(monkeypatch):
+    import time as _t
+    from analyst.llm import DAILY_QUOTA_COOLDOWN_S
+    llm = _llm([_Err(429), None], monkeypatch)
+    llm._client.outcomes[0] = type("Q", (_Err,), {})(429)
+    llm._client.outcomes[0].args = ("429 RESOURCE_EXHAUSTED quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier, limit: 20",)
+    llm.chat("s", [], [])
+    assert _PRIMARY_DOWN_UNTIL["primary"] - _t.monotonic() > DAILY_QUOTA_COOLDOWN_S - 5

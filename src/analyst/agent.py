@@ -103,7 +103,11 @@ class Agent:
         """Schema lines from BigQuery metadata (cached), falling back to the static text."""
         if self._schema_text is None:
             try:
-                d = describe_tables(self.bq)
+                if self.trace is not None:
+                    with self.tracer.span(self.trace, "schema", "describe_tables"):
+                        d = describe_tables(self.bq)
+                else:
+                    d = describe_tables(self.bq)
                 lines = [f"{t}({', '.join(c['name'] for c in info['columns'])})" for t, info in d["tables"].items()]
                 lines[-1] += "   -- users: personal columns are not available"
                 self._schema_text = "\n".join(lines) + "\nJoins: " + d["joins"]

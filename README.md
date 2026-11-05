@@ -37,7 +37,8 @@ items, and keeps a library of them. Built for the OpsFleet technical assignment.
 
 Requirements: Python 3.11+, a Gemini API key, a Google Cloud project with BigQuery enabled
 (the dataset is public, the project is only for quota and billing; the free tier is 1 TB of
-queries per month).
+queries per month), and either the `gcloud` CLI (for `gcloud auth application-default login`)
+or a service-account key file (`GOOGLE_APPLICATION_CREDENTIALS`), see below.
 
 ```bash
 git clone <this repo> && cd retail-analyst-agent
@@ -122,7 +123,7 @@ result rows (today they do, masked).
 The Gemini free tier allows 5 requests per minute and 20 requests per day on
 `gemini-3.8-flash` (measured 2026-11-04), so a free key runs mostly on the fallback. The agent gives each model one attempt and walks
 the fallback chain `ANALYST_FALLBACK_MODEL`
-(default `gemini-3.5-flash-lite,gemini-3.5-flash`, all Gemini as the client asked), so a model
+(default `gemini-3.5-flash,gemini-3.5-flash-lite`, all Gemini as the client asked), so a model
 call never waits more than about 15 seconds on quota (the guard classifier runs on the cheap
 model directly and answers in 1-4 s). On 2026-11-05 both `gemini-3.8-flash` and
 `gemini-3.5-flash-lite` returned 503 "high demand" for stretches of minutes while
@@ -214,18 +215,21 @@ Evals against the live stack (needs keys): `python evals/run_evals.py`. Determin
 plus ground-truth values from a reference query and a judge model; the last run with answers,
 latency, estimated cost and trace ids is in `evals/last_run.json`.
 
-Evidence note (2026-11-05): the committed `last_run.json` is an honest 4/13. It was the fourth
-full run of the day on a free AI Studio key, by which point `gemini-3.8-flash` and
-`gemini-3.5-flash` had hit their daily free-tier caps (429) and `gemini-3.5-flash-lite` was
-answering a one-word prompt in 13 s, so most failures are "model API unavailable" or the 30 s
-latency check, not wrong answers: every question that got a model answered correctly (judge 5/5,
-ground truth matched where defined). Earlier the same day, before the caps, the quarterly report
-(q5) passed all checks in 75 s and the top-10 and churn questions (q11, q12) were answered
-correctly with judge 5/5 but over 30 s. The previous day's run on fresh quota was 10/10 for q1-q10.
-The 2026-11-05 runs are also what exposed the hung-primary and quota-wait latency problems and
-led to the call timeout, the single-attempt fallback chain and the breaker. Re-run after the daily
-reset (08:00 UTC) or with a paid key to refresh the file; the eval pace (`--pace`) keeps the
-harness itself under the free-tier per-minute limit.
+Evidence note (2026-11-05): the committed `last_run.json` is an honest 5/13 on a fresh free
+AI Studio key, the fifth full run of the day. Every question that got a model answered
+correctly (judge 5/5, ground truth matched where defined, the quarterly report with action
+items passed all checks in 54 s), and the three refusal/PII questions passed. The eight
+failures split into two kinds: four turns where Google returned 503, 504 or a daily-quota 429
+on every model in the chain (`gemini-3.8-flash` and `gemini-3.5-flash` are 20 requests a day
+each on the free tier, so after a few questions only `gemini-3.5-flash-lite` is left), and
+four correct answers that took 33-39 s against the 30 s target, mostly time spent inside
+`gemini-3.5-flash-lite` on a day it answered a one-word prompt in 3-13 s. On a paid key the
+chain stays on the fast models and the targets are realistic; on a free key they are not,
+which is what the client said they expect ("free-tier latency is fine"). The day's runs are
+also what exposed the hung-primary, quota-wait and per-request schema-fetch latency and led
+to the call timeout, the single-attempt fallback chain, the breaker and the process-wide
+schema cache. Re-run `python evals/run_evals.py` on a paid key or after the daily reset
+(08:00 UTC) to refresh the file; `--pace` keeps the harness under the per-minute limit.
 
 ## Configuration
 
@@ -247,7 +251,10 @@ easier to read, test and trace when it is explicit, and every cap (steps, SQL at
 bytes, retries) is one visible line. I have built production agents with LangChain and
 LangGraph (financial portfolio agents, RAG) and with my own loops plus LiteLLM routing
 (an enterprise planning SaaS); I prefer the explicit loop for anything that must be
-debugged from a trace. If this grows into multi-agent workflows, LangGraph or Google ADK can
+debugged from a trace. With the `google-genai` SDK itself my experience is shorter: I have
+used Gemini through LiteLLM and Vertex before, and this is my first project on the new SDK
+directly, which is why its tool-calling quirks (thought signatures, thinking budgets on the
+free tier) are documented here from live tests rather than assumed. If this grows into multi-agent workflows, LangGraph or Google ADK can
 host the same tools. The model interface is provider-neutral, so a second provider is one
 class.
 
