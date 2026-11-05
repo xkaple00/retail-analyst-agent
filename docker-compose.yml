@@ -1,0 +1,18 @@
+services:
+  analyst:
+    build: .
+    image: retail-analyst-agent
+    env_file: .env
+    environment:
+      # BigQuery auth inside the container: a credentials folder from the host, mounted read-only.
+      # Default: your gcloud ADC file. For a service-account key set GOOGLE_CREDENTIALS_DIR and
+      # GOOGLE_CREDENTIALS_FILE (see README).
+      GOOGLE_APPLICATION_CREDENTIALS: /gcloud/${GOOGLE_CREDENTIALS_FILE:-application_default_credentials.json}
+      ANALYST_DATA_DIR: /app/data
+    volumes:
+      - ${GOOGLE_CREDENTIALS_DIR:-~/.config/gcloud}:/gcloud:ro
+      - ./data:/app/data
+      - ./prompts:/app/prompts          # edit persona.md on the host, takes effect next turn
+      - ./golden:/app/golden
+    stdin_open: true
+    tty: true

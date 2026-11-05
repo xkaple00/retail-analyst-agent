@@ -1,0 +1,9 @@
+google-genai==2.34.0
+google-cloud-bigquery==3.47.0
+google-api-core==2.43.2
+google-auth==2.62.1
+sqlglot==30.29.0
+rich==15.0.0
+typer==0.27.3
+PyYAML==6.0.3
+python-dotenv==1.2.4

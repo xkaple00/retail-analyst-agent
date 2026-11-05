@@ -1,0 +1,16 @@
+# Demo users and their data scope. Access is by brand: a manager owns one or more brands,
+# the CEO (empty list) sees everything. In production the brand list comes from the JWT /
+# an entitlement service; here it is a file so reviewers can play with it.
+users:
+  alice:
+    name: Alice
+    role: Brand Manager
+    brands: [Calvin Klein, Tommy Hilfiger, Jones New York]
+  bob:
+    name: Bob
+    role: Brand Manager
+    brands: [Diesel, Carhartt, True Religion]
+  ceo:
+    name: Dana
+    role: CEO
+    brands: []

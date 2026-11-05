@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+.pytest_cache/
+# service-account keys
+*-sa.json
+*service-account*.json
+*credentials*.json
+*.egg-info/
