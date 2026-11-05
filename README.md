@@ -38,13 +38,15 @@ items, and keeps a library of them. Built for the OpsFleet technical assignment.
 Requirements: Python 3.11+, a Gemini API key, a Google Cloud project with BigQuery enabled
 (the dataset is public, the project is only for quota and billing; the free tier is 1 TB of
 queries per month), and either the `gcloud` CLI (for `gcloud auth application-default login`)
-or a service-account key file (`GOOGLE_APPLICATION_CREDENTIALS`), see below.
+or a service-account key file (`GOOGLE_APPLICATION_CREDENTIALS`), see below. On Windows clone
+into a short path (or enable long paths): the Google SDKs have deep package paths and a very
+long checkout path fails `pip install` with WinError 206.
 
 ```bash
 git clone <this repo> && cd retail-analyst-agent
 python -m venv .venv
 . .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -r requirements-dev.txt && pip install -e .   # pinned deps + pytest, and the `analyst` command
+pip install -r requirements.txt -r requirements-dev.txt && pip install -e .   # pinned deps + pytest, and the `analyst` command
 cp .env.example .env            # put GEMINI_API_KEY and GOOGLE_CLOUD_PROJECT in it
 gcloud auth application-default login
 ```
