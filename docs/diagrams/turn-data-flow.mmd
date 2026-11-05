@@ -1,0 +1,36 @@
+sequenceDiagram
+    participant U as Executive
+    participant API as Chat API
+    participant G as Guard
+    participant A as Agent loop
+    participant K as Golden retrieval
+    participant L as Gemini
+    participant S as SQL guard
+    participant B as BigQuery
+    participant P as Postgres
+    participant T as Tracing
+
+    U->>API: "Why is Texas underspending vs California?"
+    API->>API: SSO identity, brand list from the JWT
+    API->>G: message
+    G->>G: injection / off-topic rules
+    G->>L: classify (Flash-Lite) ALLOW/DENY
+    G-->>T: guard span
+    API->>A: message + user card
+    A->>K: top-3 trios for the question
+    A->>P: preferences, last N messages
+    A->>L: system(prompt + persona + card + schema + trios) + history + tools
+    L-->>A: function_call run_sql(sql)
+    A->>S: sql
+    S->>S: parse, single SELECT, deny PII columns, rewrite tables to scoped subqueries, add LIMIT
+    S->>B: dry run (bytes)
+    S->>B: query (maximum_bytes_billed, timeout)
+    B-->>A: rows (capped)
+    A-->>T: sql span (original + scoped SQL, bytes, rows, error)
+    A->>L: tool result (masked)
+    L-->>A: text answer (or another tool call, up to 6 steps, the last one without tools)
+    A->>A: output PII mask
+    A->>P: save messages
+    A-->>T: close trace (tokens, latency, status)
+    A-->>API: answer (streamed)
+    API-->>U: answer + trace id

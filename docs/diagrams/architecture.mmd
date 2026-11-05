@@ -1,0 +1,67 @@
+flowchart TB
+    subgraph Clients
+        CLI[CLI chat<br/>proto]
+        Web[Web / Slack UI<br/>later]
+    end
+
+    subgraph Edge["API layer (Cloud Run)"]
+        GW[Chat API<br/>FastAPI, SSE streaming]
+        AuthN[Identity<br/>Google SSO / IAP]
+        Ent[Entitlements<br/>user -> product scope]
+    end
+
+    subgraph Agent["Agent service (Cloud Run)"]
+        Guard[Input guard<br/>rules + small model]
+        Orch[Agent loop<br/>tool calling, step & cost caps]
+        Prompt[Prompt assembly<br/>system + persona + user card + golden examples]
+        Tools[Tools<br/>get_schema, run_sql, reports, preferences]
+        Mask[Output PII mask]
+    end
+
+    subgraph Data["Data access"]
+        SQLGuard[SQL guard<br/>parse, scope rewrite, PII deny-list, dry-run cost cap]
+        BQ[(BigQuery<br/>thelook_ecommerce, read-only SA)]
+    end
+
+    subgraph Knowledge["Golden knowledge"]
+        VDB[(Vector store<br/>Vertex AI Vector Search / pgvector)]
+        GB[(Golden bucket<br/>GCS: trios as JSON)]
+        Review[Reviewer queue<br/>analyst approves candidates]
+    end
+
+    subgraph State["State"]
+        PG[(Cloud SQL Postgres<br/>reports, preferences, conversations, confirmations)]
+        Mem[(Memory<br/>user prefs + system lessons)]
+    end
+
+    subgraph LLM["Models"]
+        Gem[Gemini Flash<br/>primary]
+        GemLite[Gemini Flash-Lite<br/>guard, judge, fallback]
+        Alt[Second provider<br/>Claude via Vertex, optional]
+    end
+
+    subgraph Ops["Observability & control"]
+        OTel[OpenTelemetry traces<br/>Cloud Trace + Langfuse]
+        Metrics[Metrics & alerts<br/>Cloud Monitoring]
+        PromptReg[Prompt registry<br/>Langfuse prompts / Sheet]
+        Evals[Eval pipeline<br/>golden questions + LLM judge, CI]
+    end
+
+    CLI --> GW
+    Web --> GW
+    GW --> AuthN --> Ent --> Guard --> Orch
+    Orch <--> Prompt
+    Prompt --> VDB
+    Prompt --> PromptReg
+    Prompt --> Mem
+    Orch <--> Tools
+    Tools --> SQLGuard --> BQ
+    Tools --> PG
+    Orch <--> Gem
+    Orch -.fallback.-> GemLite
+    Orch -.optional.-> Alt
+    Guard --> GemLite
+    Orch --> Mask --> GW
+    Tools -- save_report --> Review --> GB --> VDB
+    Orch --> OTel --> Metrics
+    OTel --> Evals

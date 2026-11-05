@@ -15,6 +15,8 @@ user's remit.
 
 ## 2. Architecture diagram
 
+Standalone files: [`diagrams/architecture.mmd`](diagrams/architecture.mmd) (Mermaid source), [`diagrams/architecture.svg`](diagrams/architecture.svg), [`diagrams/architecture.png`](diagrams/architecture.png) (high resolution).
+
 ```mermaid
 flowchart TB
     subgraph Clients
@@ -102,6 +104,8 @@ flowchart TB
 | Evals | Golden question set + deterministic checks + LLM judge, run in CI and nightly | Gate before deploy, drift detection after. |
 
 ## 4. Data flow of one turn
+
+Standalone files: [`diagrams/turn-data-flow.mmd`](diagrams/turn-data-flow.mmd) (Mermaid source), [`diagrams/turn-data-flow.svg`](diagrams/turn-data-flow.svg), [`diagrams/turn-data-flow.png`](diagrams/turn-data-flow.png) (high resolution).
 
 ```mermaid
 sequenceDiagram
