@@ -144,7 +144,7 @@ def traces(last: int = 10) -> None:
 
 
 @app.command()
-def trace(trace_id: str) -> None:
+def trace(trace_id: str, full: bool = typer.Option(False, help="Print every span payload in full (default: 4000 chars each, the system prompt always in full)")) -> None:
     """Deep dive: every LLM call, tool call and SQL of one turn."""
     rt = build_runtime()
     t = tracing.get_trace(rt.conn, trace_id)
@@ -154,7 +154,10 @@ def trace(trace_id: str) -> None:
     spans = t.pop("spans")
     console.print(Panel(json.dumps(t, indent=2, default=str), title="trace"))
     for s in spans:
-        console.print(Panel(json.dumps(s["payload"], indent=2, default=str)[:4000], title=f"{s['kind']} · {s['name']} · {s['status']} · {s['duration_ms']} ms"))
+        body = json.dumps(s["payload"], indent=2, default=str)
+        if not full and s["kind"] != "prompt" and len(body) > 4000:
+            body = body[:4000] + "\n... (" + str(len(body) - 4000) + " more chars, use --full)"
+        console.print(Panel(body, title=f"{s['kind']} · {s['name']} · {s['status']} · {s['duration_ms']} ms"))
 
 
 @app.command()
