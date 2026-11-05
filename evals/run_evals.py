@@ -5,7 +5,10 @@ and ground truth: `reference_sql` is run with the same user's scope and its firs
 appear in the answer (numbers within 2%, strings verbatim), so a wrong number fails even if it reads well.
 Check (LLM-as-judge): does the answer address the user's intent? 1-5 with a one-line reason, on
 ANALYST_JUDGE_MODEL (a different model from the one that answered, when quota allows).
-Usage: python evals/run_evals.py [--limit N] [--only q1,q5]   (needs GEMINI_API_KEY and BigQuery access)
+Check (latency, client targets 2026-11-05): a simple question within 30 s, a report (`kind: report`) within 120 s.
+Usage: python evals/run_evals.py [--limit N] [--only q1,q5] [--pace 20]   (needs GEMINI_API_KEY and BigQuery access)
+`--pace` seconds between questions (default 20): a real user does not fire questions back to back, and on the
+free tier a back-to-back run measures the harness's own per-minute quota waits instead of the agent.
 Results: evals/last_run.json (committed, so the repo carries the evidence).
 """
 
@@ -15,6 +18,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +35,7 @@ when asked). Reply as: <score>: <one line reason>."""
 
 PII_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+|\b\d{3}[ -]\d{3}[ -]\d{4}\b")
 NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+LATENCY_TARGET_S = {"simple": 30, "report": 120}  # client: simple 10-30 s, long reports 1-2 min
 
 
 def _ground_truth(agent, sql: str, text: str) -> tuple[bool, dict]:
@@ -61,6 +66,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--only", default="", help="comma-separated question ids, e.g. q5,q8")
+    ap.add_argument("--pace", type=float, default=20.0, help="seconds to wait between questions (free-tier RPM)")
     args = ap.parse_args()
     qs = [json.loads(l) for l in (Path(__file__).parent / "questions.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     if args.only:
@@ -72,7 +78,9 @@ def main() -> int:
     settings.data_dir = settings.data_dir / "evals"
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     results = []
-    for q in qs:
+    for i, q in enumerate(qs):
+        if i and args.pace:
+            time.sleep(args.pace)
         rt, agent = build_live_agent(q["user"], settings)
         r = agent.handle(q["question"], confirm=lambda p: True)
         t = tracing.get_trace(rt.conn, r.trace_id)
@@ -97,6 +105,9 @@ def main() -> int:
             checks["mentions"] = all(m.lower() in r.text.lower() for m in exp["mentions"])
         if exp.get("out_of_scope_notice"):
             checks["scope_notice"] = bool(re.search(r"scope|not available|outside|don't have access|no access", r.text, re.I))
+        latency_s = round((t["duration_ms"] or 0) / 1000, 1)
+        target_s = LATENCY_TARGET_S[q.get("kind", "simple")]
+        checks["latency"] = latency_s <= target_s
         truth: dict = {}
         if q.get("reference_sql") and r.status == "ok":
             try:
@@ -113,8 +124,10 @@ def main() -> int:
                     judge = f"judge error: {str(e)[:120]}"
         passed = all(checks.values())
         results.append({"id": q["id"], "passed": passed, "checks": checks, "ground_truth": truth, "judge": judge,
+                        "latency_s": latency_s, "latency_target_s": target_s, "estimated_cost_usd": t.get("estimated_cost_usd", 0),
+                        "llm_retries": t.get("retries", 0), "fallback_used": bool(t.get("fallback_used")),
                         "trace": r.trace_id, "answer": r.text[:1500], "model": settings.model})
-        print(f"{'PASS' if passed else 'FAIL'} {q['id']} {checks} judge={judge!r}")
+        print(f"{'PASS' if passed else 'FAIL'} {q['id']} {latency_s}s/{target_s}s ${t.get('estimated_cost_usd', 0):.4f} {checks} judge={judge!r}")
     n_pass = sum(r["passed"] for r in results)
     print(f"\n{n_pass}/{len(results)} passed")
     out = {"run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "passed": n_pass, "total": len(results), "results": results}

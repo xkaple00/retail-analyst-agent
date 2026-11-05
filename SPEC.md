@@ -80,11 +80,18 @@ Scope enforcement (`scope.py`):
 
 ## 4. PII
 
+Client rule (2026-11-05): never show first or last name, email, street address,
+postal code or exact coordinates, and PII must never reach the LLM.
+
 PII columns in `users`: `first_name`, `last_name`, `email`, `street_address`,
-`postal_code`, `latitude`, `longitude`. They are never selectable: the `users`
-subquery projects only `id, age, gender, state, city, country, traffic_source,
-created_at`. Any explicit reference to a PII column fails parsing with a clear
-error that is fed back to the model so it can rewrite the query.
+`postal_code`, `latitude`, `longitude` (exactly the client's list). They are
+never selectable: the `users` subquery projects only `id, age, gender, state,
+city, country, traffic_source, created_at`. Any explicit reference to a PII
+column fails parsing with a clear error that is fed back to the model so it can
+rewrite the query. Because the projection happens in the SQL that BigQuery runs,
+PII never enters the process, and every tool result is masked (`mask_value`)
+before it is handed to the model, so it cannot reach the LLM even if a column
+carried free text.
 
 Second layer (`pii.py`): the final assistant text and every tool result are
 passed through regex masks for emails, phone numbers, street addresses
@@ -187,9 +194,20 @@ LLM calls (`llm.py`):
 
 - Retry on 429 and 5xx once, honouring the server retry hint (max 15 s), so a
   rate-limited turn never stalls for minutes.
-- Then fallback to `FALLBACK_MODEL` once (also on 404 = wrong model name), with
-  the same history: Gemini 3 thought signatures replay across the two models
-  (verified live; a function call without its signature is rejected with 400).
+- One call is capped at `LLM_TIMEOUT_S` (25 s). A timeout is not retried on
+  the same model; the fallback answers. After any primary failure the primary
+  is skipped for `LLM_PRIMARY_COOLDOWN_S` (300 s) (in-process breaker), so the
+  client's 30 s target holds while the primary is unhealthy.
+- Then the fallback chain `ANALYST_FALLBACK_MODEL` (comma list, default
+  `gemini-3.5-flash-lite,gemini-3.5-flash`), each model once with the same
+  retry rule (also on 404 = wrong model name), with the same history: Gemini 3
+  thought signatures replay across the models (verified live; a function call
+  without its signature is rejected with 400).
+- Fallback stays within Gemini models (client default). A second provider is
+  named in config (`ANALYST_SECOND_PROVIDER`) with
+  `ANALYST_SECOND_PROVIDER_ENABLED=false`; enabling it without an
+  implementation fails fast at startup with a clear message. Trade-off in
+  `docs/ARCHITECTURE.md` §9.
 - 400/401/403 raise `LLMUnavailable` at once: a second model would repeat them.
 - Then raise `LLMUnavailable`. The CLI prints one friendly line, the trace is
   marked `error`, the session continues.
@@ -201,6 +219,12 @@ Cost caps: `MAX_LLM_CALLS_PER_TURN` (6), `MAX_SQL_ATTEMPTS` (3),
 model context, and per-user daily budgets `DAILY_TOKEN_BUDGET` /
 `DAILY_BYTES_BUDGET` (summed from today's traces; a turn over budget is refused
 before any model call, `guard_result=deny/budget`).
+
+Cost per question (client: assume $1, configurable, design only): every trace
+stores `estimated_cost_usd` from `PRICE_PER_M_INPUT_TOKENS`,
+`PRICE_PER_M_OUTPUT_TOKENS` and `PRICE_PER_TB_BIGQUERY`; a turn above
+`COST_PER_QUESTION_USD` gets a `budget/over_question_cost` span (flagged, not
+blocked). `analyst stats` shows the total and the most expensive turn.
 
 ## 8. Observability
 
@@ -216,8 +240,13 @@ full span list in `data/traces.jsonl`:
   args, result summary, latency), `sql` (original sql, scoped sql, bytes,
   rows, error), `guard`.
 
+Retention (client): `CHAT_RETENTION_DAYS` (90) for `messages`,
+`AUDIT_RETENTION_DAYS` (365) for `traces`, `spans` and `deletions`; `reports`
+and `preferences` are never purged. `purge_expired` runs at every startup; 0
+disables a window.
+
 CLI: `analyst stats` (counts, error rate, p50/p95 latency, tokens, bytes,
-self-correction rate), `analyst traces --last N`, `analyst trace <id>` (full
+self-correction rate, estimated cost), `analyst traces --last N`, `analyst trace <id>` (full
 message correspondence and spans). Logs are JSON lines, so they can be shipped
 to any log store. Production path: the same spans exported with OpenTelemetry
 to Langfuse/Cloud Trace (design doc).
@@ -279,10 +308,34 @@ Configuration via `.env`: `GEMINI_API_KEY`, `GOOGLE_CLOUD_PROJECT`,
   ground truth where a `reference_sql` is given (the reference query runs under the
   same user's scope and its values must appear in the answer, numbers within 2%),
   and asks a separate judge model (`ANALYST_JUDGE_MODEL`) to score intent match.
-  The last run is committed as `evals/last_run.json` with the answers and trace ids.
+  Latency is a check: `kind: simple` within 30 s, `kind: report` within 120 s
+  (client targets). The client's example questions (top 10 best sellers by
+  revenue and by customers, churn spike, quarterly report with action items, RFM
+  segmentation with action items per group) are in the set.
+  The last run is committed as `evals/last_run.json` with the answers, latency,
+  estimated cost and trace ids.
 - Dependencies are pinned (`requirements.txt`); `requirements-dev.txt` adds pytest.
 
-## 13. Done when
+## 13. Client answers that shaped this spec
+
+2026-11-04 (Harry): access by brand only; golden format is ours as long as
+approval scales; free AI Studio key, 2-5 model calls per question, model in
+config; reports kept until deleted, hard delete; team runs it with its own GCP
+project and key; Docker optional; README with example run and `.env.example`.
+
+2026-11-05 (Harry): size for about 100 active managers a day with about 10
+questions each (§ `docs/ARCHITECTURE.md` 15); example questions above (§12);
+simple questions 10-30 s, reports 1-2 min (§12); CLI approval is fine, describe
+scalable approval (`docs/ARCHITECTURE.md` §5); the PII list (§4); strict delete
+flow with the exact list, hard delete, author only (§6, `request_delete_reports`);
+charts, web search, email as extension points; Gemini-only fallback with other
+providers in config but off (§7); $1 per question, configurable, design only
+(§7); chat 90 days, audit 1 year, reports until deleted (§8).
+
+Open with Roi: one CLI run = one conversation; CEO access to `users`; per-user
+daily budget and who sees usage; whether traces keep full prompts and rows.
+
+## 14. Done when
 
 - `pip install -r requirements.txt && pip install -e . && analyst chat --user alice`
   answers "top 5 products by revenue last month" with a scoped query.

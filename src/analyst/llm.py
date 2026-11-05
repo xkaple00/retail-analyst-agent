@@ -42,9 +42,31 @@ class LLM(Protocol):
     def classify(self, system: str, text: str, model: str | None = None) -> str: ...
 
 
+class _PrimaryCoolingDown(Exception):
+    """Raised internally when the primary model was unhealthy a moment ago (breaker open)."""
+
+
+# Breaker state is per process and per model name, not per client object: an Agent (and its LLM
+# client) is built per request, and every request should benefit from what the last one learned.
+# Production: the same map in Redis so all instances share it.
+_PRIMARY_DOWN_UNTIL: dict[str, float] = {}
+
+
 RETRYABLE_CODES = {408, 409, 429, 500, 502, 503, 504}
 # Client-side errors that a second model would only repeat (bad request, bad key, no access).
 NO_FALLBACK_CODES = {400, 401, 403}
+
+
+def more_retries(err: Exception, max_attempts: int) -> int:
+    """Retries spent on a model that finally failed: every attempt but the first (none if it was not transient)."""
+    code = _status_code(err)
+    return max_attempts - 1 if (code in RETRYABLE_CODES or code is None) else 0
+
+
+def _is_timeout(err: Exception) -> bool:
+    """A hung request (client-side timeout). Retrying the same model would just hang again."""
+    name = type(err).__name__.lower()
+    return "timeout" in name or "timed out" in str(err).lower()
 
 
 def _status_code(err: Exception) -> int | None:
@@ -56,20 +78,30 @@ def _status_code(err: Exception) -> int | None:
 
 
 class GeminiLLM:
-    def __init__(self, api_key: str, model: str, fallback_model: str | None = None, max_attempts: int = 2) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        fallback_model: str | None = None,
+        max_attempts: int = 2,
+        timeout_s: float = 25.0,
+        primary_cooldown_s: float = 300.0,
+    ) -> None:
         if not api_key:
             raise LLMUnavailable("GEMINI_API_KEY is not set (see .env.example)")
         from google import genai
         from google.genai import types
 
         # The SDK retries 5xx on its own for minutes; we own retry + fallback, so keep it to one attempt.
+        # The per-call timeout is short on purpose: a hung primary must not eat the 30 s answer target.
         self._client = genai.Client(
             api_key=api_key,
-            http_options=types.HttpOptions(timeout=60_000, retry_options=types.HttpRetryOptions(attempts=1)),
+            http_options=types.HttpOptions(timeout=int(timeout_s * 1000), retry_options=types.HttpRetryOptions(attempts=1)),
         )
         self.model = model
-        self.fallback_model = fallback_model
+        self.fallback_model = fallback_model  # "a" or "a,b,c": tried in order after the primary
         self.max_attempts = max_attempts
+        self.primary_cooldown_s = primary_cooldown_s
 
     # --- conversions -------------------------------------------------
     def _to_contents(self, messages: list[dict]):
@@ -131,8 +163,8 @@ class GeminiLLM:
                 code = _status_code(e)
                 transient = code in RETRYABLE_CODES or code is None
                 last = e
-                if not transient or attempt == self.max_attempts - 1:
-                    break
+                if not transient or attempt == self.max_attempts - 1 or _is_timeout(e):
+                    break  # a hang is not retried on the same model: the fallback answers faster
                 retries += 1
                 delay = min(8.0, (2**attempt) + random.random())
                 hinted = re.search(r"retry in ([\d.]+)s", str(e))
@@ -142,28 +174,45 @@ class GeminiLLM:
                 time.sleep(delay)
         raise last if last else RuntimeError("unreachable")
 
+    def _fallbacks(self, primary: str) -> list[str]:
+        return [m.strip() for m in (self.fallback_model or "").split(",") if m.strip() and m.strip() != primary]
+
     def chat(self, system: str, messages: list[dict], tools: list[dict], model: str | None = None) -> LLMResponse:
         contents = self._to_contents(messages)
         config = self._config(system, tools, temperature=0.2)
         primary = model or self.model
-        fallback_used = False
-        retries = self.max_attempts - 1  # retries spent on the primary before giving up on it
-        try:
-            resp, retries = self._generate(primary, contents, config)
-        except Exception as e:
-            if not self.fallback_model or self.fallback_model == primary:
-                raise LLMUnavailable(f"model API unavailable: {e}") from e
-            if _status_code(e) in NO_FALLBACK_CODES:
-                raise LLMUnavailable(f"model API rejected the request ({_status_code(e)}): {e}") from e
-            log.warning("falling back to %s after: %s", self.fallback_model, e)
+        chain = [primary] + (self._fallbacks(primary) if model is None else [])  # an explicit model is used as is
+        retries = 0
+        used = primary
+        resp = None
+        last: Exception | None = None
+        cooldown = getattr(self, "primary_cooldown_s", 300.0)
+        for i, m in enumerate(chain):
+            is_last = i == len(chain) - 1
+            if not is_last and time.monotonic() < _PRIMARY_DOWN_UNTIL.get(m, 0.0):
+                log.info("model %s cooling down, skipping to %s", m, chain[i + 1])
+                continue  # breaker open: this model failed a moment ago, do not pay its timeout again
             try:
-                resp, more = self._generate(self.fallback_model, contents, config)
+                resp, more = self._generate(m, contents, config)
                 retries += more
-                fallback_used = True
-            except Exception as e2:
-                raise LLMUnavailable(f"model API unavailable (primary and fallback): {e2}") from e2
+                used = m
+                break
+            except Exception as e:
+                last = e
+                if _status_code(e) in NO_FALLBACK_CODES:
+                    raise LLMUnavailable(f"model API rejected the request ({_status_code(e)}): {e}") from e
+                if is_last:
+                    break
+                # Remember that this model is unhealthy so the next calls skip straight to the next one
+                # (client target: simple answers within 30 s; a hung model must not be paid for twice).
+                _PRIMARY_DOWN_UNTIL[m] = time.monotonic() + cooldown
+                retries += 0 if _is_timeout(e) else more_retries(e, self.max_attempts)
+                log.warning("falling back to %s after %s: %s (skipped for %.0fs)", chain[i + 1], m, e, cooldown)
+        if resp is None:
+            raise LLMUnavailable(f"model API unavailable ({', '.join(chain)}): {last}") from last
 
-        out = LLMResponse(model=self.fallback_model if fallback_used else primary, retries=retries, fallback_used=fallback_used)
+        fallback_used = used != primary
+        out = LLMResponse(model=used, retries=retries, fallback_used=fallback_used)
         usage = getattr(resp, "usage_metadata", None)
         if usage:
             out.prompt_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)

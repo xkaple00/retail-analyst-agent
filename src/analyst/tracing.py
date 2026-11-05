@@ -23,6 +23,23 @@ def _now() -> str:
 
 
 @dataclass
+class Prices:
+    """USD per million input tokens, per million output tokens, per TB billed by BigQuery."""
+    input_per_m: float = 0.30
+    output_per_m: float = 2.50
+    bq_per_tb: float = 6.25
+    question_cap: float = 1.0  # client: assume $1 per question, configurable; a turn above it is flagged
+
+    def cost(self, prompt_tokens: int, completion_tokens: int, bytes_billed: int) -> float:
+        return round(
+            prompt_tokens / 1e6 * self.input_per_m
+            + completion_tokens / 1e6 * self.output_per_m
+            + bytes_billed / 1e12 * self.bq_per_tb,
+            6,
+        )
+
+
+@dataclass
 class Trace:
     trace_id: str
     conversation_id: str
@@ -43,6 +60,7 @@ class Trace:
     error: str = ""
     user_message: str = ""
     assistant_message: str = ""
+    estimated_cost_usd: float = 0.0
     spans: list[dict] = field(default_factory=list)
 
     def duration_ms(self) -> int:
@@ -54,9 +72,10 @@ class Trace:
 
 
 class Tracer:
-    def __init__(self, conn: sqlite3.Connection, jsonl_path: Path) -> None:
+    def __init__(self, conn: sqlite3.Connection, jsonl_path: Path, prices: Prices | None = None) -> None:
         self.conn = conn
         self.jsonl_path = jsonl_path
+        self.prices = prices or Prices()
         self.last_trace_id: str | None = None
 
     def start(self, conversation_id: str, user_id: str, user_message: str) -> Trace:
@@ -83,14 +102,18 @@ class Tracer:
         if error:
             t.error = error[:500]
         dur = t.duration_ms()
+        t.estimated_cost_usd = self.prices.cost(t.prompt_tokens, t.completion_tokens, t.bytes_billed)
+        if self.prices.question_cap and t.estimated_cost_usd > self.prices.question_cap:
+            t.event("budget", "over_question_cost", estimated_cost_usd=t.estimated_cost_usd, cap_usd=self.prices.question_cap)
         self.conn.execute(
             "INSERT INTO traces(trace_id, conversation_id, user_id, started_at, duration_ms, status, guard_result, "
             "llm_calls, prompt_tokens, completion_tokens, tool_calls, sql_attempts, sql_failures, bytes_billed, retries, "
-            "fallback_used, error, user_message, assistant_message) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "fallback_used, error, user_message, assistant_message, estimated_cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 t.trace_id, t.conversation_id, t.user_id, t.started_at, dur, t.status, t.guard_result,
                 t.llm_calls, t.prompt_tokens, t.completion_tokens, t.tool_calls, t.sql_attempts, t.sql_failures,
                 t.bytes_billed, t.retries, t.fallback_used, t.error, t.user_message, t.assistant_message,
+                t.estimated_cost_usd,
             ),
         )
         for s in t.spans:
@@ -122,7 +145,7 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT COUNT(*) n, SUM(status='ok') ok, SUM(status='refused') refused, SUM(status='error') errors, "
         "SUM(llm_calls) llm_calls, SUM(prompt_tokens) pt, SUM(completion_tokens) ct, SUM(tool_calls) tools, "
         "SUM(sql_attempts) sql_attempts, SUM(sql_failures) sql_failures, SUM(bytes_billed) bytes, SUM(retries) retries, "
-        "SUM(fallback_used) fallbacks FROM traces"
+        "SUM(fallback_used) fallbacks, SUM(estimated_cost_usd) cost, MAX(estimated_cost_usd) max_cost FROM traces"
     ).fetchone()
     durs = [r[0] for r in conn.execute("SELECT duration_ms FROM traces WHERE duration_ms IS NOT NULL ORDER BY duration_ms")]
 
@@ -150,6 +173,8 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "bytes_billed": row["bytes"] or 0,
         "llm_retries": row["retries"] or 0,
         "llm_fallbacks": row["fallbacks"] or 0,
+        "estimated_cost_usd": round(row["cost"] or 0.0, 4),
+        "max_cost_per_turn_usd": round(row["max_cost"] or 0.0, 4),
     }
 
 

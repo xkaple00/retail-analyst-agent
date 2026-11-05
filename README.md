@@ -90,16 +90,42 @@ access is by product brand only (a manager has one or more brands, the CEO sees 
 production the list comes from the JWT); the golden-bucket format is mine as long as approval
 scales; a newer Gemini model with a free AI Studio key, about 2-5 model calls per question,
 model name in config; reports are kept until deleted and deletion is a hard delete; the team runs
-it with their own GCP project and key. Open: whether one CLI run is one conversation (the
-prototype supports both: a new conversation per run, or `--conversation <id>` to continue one).
+it with their own GCP project and key.
+
+Second round, 2026-11-05 (Harry), and what changed because of it:
+
+| Client answer | In the prototype |
+|---|---|
+| Tens to a few hundred executives, few active at once; size for about 100 active managers a day, about 10 questions each | Capacity and cost model in `docs/ARCHITECTURE.md` §15 (about 1,000 questions a day, roughly 6 in flight at peak) |
+| Example questions: top 10 best sellers by revenue and by number of customers, why churn spiked last month, a Q1 report with insights and action items for Q2, RFM segmentation with action items per group | All four are in `evals/questions.jsonl` (q11, q12, q5, q13) and pass |
+| Simple questions 10-30 s, long reports 1-2 min | Latency is a pass/fail check in the evals (30 s simple, 120 s report) and in `evals/last_run.json` |
+| CLI approval is fine; describe an approval approach that scales | `docs/ARCHITECTURE.md` §5 "Approval that scales" |
+| Never show first/last name, email, street address, postal code or exact coordinates; PII must never reach the LLM | Exactly those seven columns are the deny-list; `users` is projected to safe columns before any query; every tool result is masked before it goes to the model; tests in `tests/test_client_answers.py` |
+| Delete: strict confirmation, show the exact list first, hard delete, only the author sees or deletes | `request_delete_reports` returns the exact list, the turn pauses, deletion only after an explicit yes; rows are deleted, not flagged; all lookups are keyed by the author |
+| Charts, web search, email delivery are extension points, no priority | `docs/ARCHITECTURE.md` §13 |
+| Fall back between Gemini models only; other providers in config but switched off; explain the trade-off | `ANALYST_SECOND_PROVIDER_ENABLED=false` by default; `docs/ARCHITECTURE.md` §9 has the trade-off |
+| Assume $1 per question, configurable (design only) | `COST_PER_QUESTION_USD`; the estimated cost of every turn is stored in its trace and a turn above the cap is flagged, not blocked |
+| Chat history 90 days, audit log 1 year, reports until deleted; no compliance rules beyond "PII never reaches the LLM or the output" | `CHAT_RETENTION_DAYS=90`, `AUDIT_RETENTION_DAYS=365`, purged at startup; reports are never purged |
+
+Still with Roi: whether one CLI run is one conversation (the prototype supports both: a new
+conversation per run, or `--conversation <id>` to continue one), CEO access to the `users`
+table, per-user daily budget and who sees usage, and whether traces may keep full prompts and
+result rows (today they do, masked).
 
 ### Rate limits
 
 The Gemini free tier allows 5 requests per minute and 20 requests per day on
 `gemini-3.8-flash` (measured 2026-11-04), so a free key runs mostly on the fallback. The agent honours
-the server's retry delay once, then falls back to `gemini-3.5-flash-lite` (higher free
-quota), so a model call never waits more than about 15 seconds on quota (the guard classifier
-runs on the cheap model directly and answers in 1-4 s). With a paid key set
+the server's retry delay once, then walks the fallback chain `ANALYST_FALLBACK_MODEL`
+(default `gemini-3.5-flash-lite,gemini-3.5-flash`, all Gemini as the client asked), so a model
+call never waits more than about 15 seconds on quota (the guard classifier runs on the cheap
+model directly and answers in 1-4 s). On 2026-11-05 both `gemini-3.8-flash` and
+`gemini-3.5-flash-lite` returned 503 "high demand" for stretches of minutes while
+`gemini-3.5-flash` answered in 3 s, which is why the chain has a third model. A single model call is capped at
+`LLM_TIMEOUT_S` (25 s): a hung primary is not retried, the fallback answers, and the primary is
+skipped for `LLM_PRIMARY_COOLDOWN_S` (5 min) so one bad model does not break the 30 s target
+on every question (seen live on 2026-11-05, when `gemini-3.8-flash` hung for over a minute
+per call while `gemini-3.5-flash-lite` answered in 2 s). With a paid key set
 `ANALYST_MODEL`/`ANALYST_FALLBACK_MODEL` as you like. Gemini 3 models require the
 `thought_signature` of each function call to be replayed in the history; the client keeps the
 model's own content objects for that (persisted in the conversation log); the same history

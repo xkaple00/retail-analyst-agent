@@ -1,7 +1,7 @@
 import pytest
 
 from analyst.errors import LLMUnavailable
-from analyst.llm import GeminiLLM, LLMResponse
+from analyst.llm import _PRIMARY_DOWN_UNTIL, GeminiLLM, LLMResponse
 
 
 class _Err(Exception):
@@ -38,11 +38,17 @@ class _FakeClient:
         return R()
 
 
+class _Timeout(Exception):
+    pass
+
+
 def _llm(outcomes, monkeypatch, attempts=3):
     monkeypatch.setattr("time.sleep", lambda s: None)
     llm = GeminiLLM.__new__(GeminiLLM)
     llm._client = _FakeClient(outcomes)
     llm.model, llm.fallback_model, llm.max_attempts = "primary", "fallback", attempts
+    llm.primary_cooldown_s = 300.0
+    _PRIMARY_DOWN_UNTIL.clear()
     monkeypatch.setattr(GeminiLLM, "_to_contents", lambda self, m: [])
     monkeypatch.setattr(GeminiLLM, "_config", lambda self, s, t, temperature: None)
     return llm
@@ -109,3 +115,59 @@ def test_default_is_one_retry_then_fallback(monkeypatch):
     llm = _llm([_Err(429), _Err(503), None], monkeypatch, attempts=2)
     r = llm.chat("s", [], [])
     assert r.retries == 1 and r.fallback_used and llm._client.seen_models == ["primary", "primary", "fallback"]
+
+
+def test_hung_primary_is_not_retried_and_falls_back_at_once(monkeypatch):
+    """A client-side timeout means the primary is hanging: retrying it would hang again."""
+    llm = _llm([_Timeout("The operation has timed out"), None], monkeypatch)
+    r = llm.chat("s", [], [])
+    assert r.fallback_used and llm._client.seen_models == ["primary", "fallback"]
+
+
+def test_primary_breaker_skips_the_primary_during_cooldown(monkeypatch):
+    """After one failure the next calls go straight to the fallback until the cooldown ends."""
+    llm = _llm([_Err(503), _Err(503), None, None, None], monkeypatch, attempts=2)
+    llm.chat("s", [], [])
+    assert llm._client.seen_models == ["primary", "primary", "fallback"]
+    r = llm.chat("s", [], [])  # breaker open: no primary attempt at all
+    assert r.fallback_used and r.retries == 0 and llm._client.seen_models[-1] == "fallback" and len(llm._client.seen_models) == 4
+    _PRIMARY_DOWN_UNTIL.clear()  # cooldown over
+    llm.chat("s", [], [])
+    assert llm._client.seen_models[-1] == "primary"
+
+
+def test_explicit_model_bypasses_the_breaker(monkeypatch):
+    """classify()/judge pass a model explicitly; the breaker is only for the default primary."""
+    llm = _llm([None], monkeypatch)
+    _PRIMARY_DOWN_UNTIL["primary"] = 10**12
+    llm.chat("s", [], [], model="primary")
+    assert llm._client.seen_models == ["primary"]
+
+
+def test_breaker_is_shared_between_client_instances(monkeypatch):
+    """An agent (and its LLM client) is built per request; the second request must not pay the timeout again."""
+    a = _llm([_Timeout("timed out"), None], monkeypatch)
+    a.chat("s", [], [])
+    b = GeminiLLM.__new__(GeminiLLM)
+    b._client = _FakeClient([None]); b.model, b.fallback_model, b.max_attempts, b.primary_cooldown_s = "primary", "fallback", 2, 300.0
+    r = b.chat("s", [], [])
+    assert r.fallback_used and b._client.seen_models == ["fallback"]
+
+
+def test_fallback_chain_tries_models_in_order(monkeypatch):
+    """ANALYST_FALLBACK_MODEL may be a comma list: primary -> a -> b, each skipped for the cooldown after a failure."""
+    llm = _llm([_Err(503), _Err(503), _Err(503), _Err(503), None], monkeypatch, attempts=2)
+    llm.fallback_model = "fb1,fb2"
+    r = llm.chat("s", [], [])
+    assert r.fallback_used and r.model == "fb2"
+    assert llm._client.seen_models == ["primary", "primary", "fb1", "fb1", "fb2"]
+    llm._client.outcomes.append(None)
+    r2 = llm.chat("s", [], [])  # both earlier models cooling down: straight to fb2
+    assert r2.model == "fb2" and llm._client.seen_models[-1] == "fb2" and len(llm._client.seen_models) == 6
+
+
+def test_whole_chain_down_names_every_model(monkeypatch):
+    llm = _llm([_Err(503)] * 6, monkeypatch, attempts=2)
+    llm.fallback_model = "fb1,fb2"
+    with pytest.raises(LLMUnavailable, match="primary, fb1, fb2"):
+        llm.chat("s", [], [])
