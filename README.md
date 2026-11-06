@@ -43,7 +43,7 @@ into a short path (or enable long paths): the Google SDKs have deep package path
 long checkout path fails `pip install` with WinError 206.
 
 ```bash
-git clone <this repo> && cd retail-analyst-agent
+git clone https://github.com/xkaple00/retail-analyst-agent.git && cd retail-analyst-agent
 python -m venv .venv
 . .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -r requirements.txt -r requirements-dev.txt && pip install -e .   # pinned deps + pytest, and the `analyst` command
